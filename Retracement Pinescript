@@ -218,22 +218,12 @@ current_drop_pct = lookback_high > 0 ? ((lookback_high - htf_low) / lookback_hig
 // Z-Score calculation for abnormal drop detection
 var bool is_abnormal_drop = false
 if use_zscore
-    // Calculate returns from high to current price over lookback period
-    // Don't use 'var' - recreate array fresh each bar to avoid exceeding size limit
-    array<float> returns = array.new_float(0)
+    // Calculate percentage return series (high to low)
+    pct_return = htf_high > 0 ? ((htf_low - htf_high) / htf_high) * 100 : 0
 
-    // Calculate percentage changes (returns) over lookback period
-    for i = 1 to abnormal_lookback
-        if bar_index >= i
-            prev_price = htf_high[i]
-            curr_price = htf_low[i-1]
-            if prev_price > 0
-                ret = ((curr_price - prev_price) / prev_price) * 100
-                array.push(returns, ret)
-
-    // Calculate mean and standard deviation of returns
-    mean_return = array.size(returns) > 0 ? array.avg(returns) : 0.0
-    stdev_return = array.size(returns) > 0 ? array.stdev(returns) : 0.0
+    // Calculate mean and standard deviation using built-in functions over lookback period
+    mean_return = ta.sma(pct_return, abnormal_lookback)
+    stdev_return = ta.stdev(pct_return, abnormal_lookback)
 
     // Calculate current return (drop from lookback high to current low)
     current_return = lookback_high > 0 ? ((htf_low - lookback_high) / lookback_high) * 100 : 0
