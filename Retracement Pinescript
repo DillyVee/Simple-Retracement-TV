@@ -133,14 +133,16 @@ use_post_crash_mode = input.bool(false, "Post-Crash Retracement Mode", group="Po
   tooltip="SWITCHES MODE: When ON, trade retracements from post-crash highs instead of ATHs. Detects crashes, waits for stabilization, then trades retracements from recovery highs. Levels reset on new crashes (not ATHs).")
 use_zscore = input.bool(true, "Use Z-Score Detection", group="Post-Crash Mode Settings",
   tooltip="Use statistical z-score instead of fixed % threshold. More adaptive to market volatility.")
-zscore_threshold = input.float(-2.5, "Z-Score Threshold", minval=-5, maxval=-1, step=0.1, group="Post-Crash Mode Settings",
-  tooltip="Negative z-score threshold for crash detection (e.g., -2.5 = 2.5 std devs below mean). More negative = more extreme.")
+zscore_threshold = input.float(-2.5, "Z-Score Threshold", minval=-5.0, maxval=-1.0, step=0.1, group="Post-Crash Mode Settings",
+  tooltip="Z-score threshold for crash detection (e.g., -2.5 = return is 2.5 std devs below mean). More negative = more extreme crashes only.")
 crash_drop_pct = input.float(30.0, "Fixed Drop Threshold (%)", minval=10, maxval=90, step=1, group="Post-Crash Mode Settings",
   tooltip="Fixed % drop threshold for crash detection (used when z-score disabled)")
 crash_lookback = input.int(100, "Lookback Period (bars)", minval=20, maxval=500, group="Post-Crash Mode Settings",
   tooltip="Period to calculate statistics and detect crashes")
 stabilization_days = input.int(30, "Stabilization Days After Low", minval=0, maxval=365, group="Post-Crash Mode Settings",
   tooltip="Wait this many days after crash low before tracking recovery high. Price must not make new lows during this period.")
+min_bars_after_crash = input.int(3, "Min Bars After Crash (Fast Entry)", minval=0, maxval=100, group="Post-Crash Mode Settings",
+  tooltip="Allow entries this many bars after crash detection, even if stabilization isn't complete. 0 = require full stabilization. Use for faster entries.")
 
 // Position Sizing
 base_position_size = input.float(100.0, "Position Size (% of equity)", minval=1, maxval=100, group="Trading Settings")
@@ -211,29 +213,31 @@ var float current_zscore = 0.0  // Current z-score of the drop
 var float post_crash_high = na  // Highest high since stabilization complete
 var int post_crash_high_bar = 0  // Bar when post-crash high was set
 
-// Calculate highest high in lookback period
+// --------- ROBUST CRASH DETECTION WITH PROPER RETURNS-BASED Z-SCORE ------------
+
+// Fetch HTF close for returns calculation
+htf_close = request.security(syminfo.tickerid, effective_htf, close, lookahead=barmerge.lookahead_off)
+
+// Calculate proper returns series (HTF bar-to-bar percent returns)
+ret = htf_close != 0 ? 100.0 * (htf_close - htf_close[1]) / htf_close[1] : 0.0
+mean_return = ta.sma(ret, crash_lookback)
+stdev_return = ta.stdev(ret, crash_lookback)
+
+// Calculate lookback high and current drop %
 lookback_high := ta.highest(htf_high, crash_lookback)
+current_drop_pct = lookback_high > 0 ? 100.0 * (lookback_high - htf_low) / lookback_high : 0.0
 
-// Calculate drop percentage
-current_drop_pct = lookback_high > 0 ? ((lookback_high - htf_low) / lookback_high) * 100 : 0
+// For z-score: convert drop % to negative return (to align with returns sign convention)
+// A 30% drop becomes -30, comparable to negative returns in the 'ret' series
+current_return_for_z = -current_drop_pct
 
-// Z-Score calculation for crash detection
+// Calculate z-score: how many standard deviations is current return from mean
+current_zscore := (stdev_return > 0) ? (current_return_for_z - mean_return) / stdev_return : 0.0
+
+// Crash detection
 var bool is_crash = false
 if use_zscore
-    // Calculate percentage return series (high to low)
-    pct_return = htf_high > 0 ? ((htf_low - htf_high) / htf_high) * 100 : 0
-
-    // Calculate mean and standard deviation using built-in functions over lookback period
-    mean_return = ta.sma(pct_return, crash_lookback)
-    stdev_return = ta.stdev(pct_return, crash_lookback)
-
-    // Calculate current return (drop from lookback high to current low)
-    current_return = lookback_high > 0 ? ((htf_low - lookback_high) / lookback_high) * 100 : 0
-
-    // Calculate z-score (how many standard deviations from mean)
-    current_zscore := stdev_return > 0 ? (current_return - mean_return) / stdev_return : 0
-
-    // Crash if z-score is below threshold (more negative = more extreme drop)
+    // Crash if z-score <= threshold (negative z-score = abnormally large drop)
     is_crash := current_zscore <= zscore_threshold
 else
     // Use fixed percentage threshold
@@ -256,9 +260,9 @@ if crash_detected and not stabilization_complete
 // Calculate bars since crash low
 bars_since_crash_low = crash_detected ? bar_index - crash_low_bar : 0
 
-// Convert stabilization days to bars based on timeframe
+// Convert stabilization days to bars based on timeframe (robust calculation)
 bars_per_day = timeframe.in_seconds("D") / timeframe.in_seconds(effective_htf)
-stabilization_bars = math.round(stabilization_days * bars_per_day)
+stabilization_bars = math.max(1, math.round(stabilization_days * bars_per_day))  // Ensure at least 1 bar
 
 // Check if stabilization period is complete
 if crash_detected and bars_since_crash_low >= stabilization_bars
@@ -266,7 +270,14 @@ if crash_detected and bars_since_crash_low >= stabilization_bars
 
 // Track highest high since stabilization complete (this becomes our reference high in post-crash mode)
 if use_post_crash_mode and stabilization_complete
-    if na(post_crash_high) or htf_high > post_crash_high
+    // Initialize post_crash_high immediately when stabilization completes
+    // Use highest HTF high since crash low bar to give an immediate reference
+    if na(post_crash_high)
+        lookback_len = math.max(1, bar_index - crash_low_bar + 1)
+        post_crash_high := ta.highest(htf_high, lookback_len)
+        post_crash_high_bar := bar_index
+    // Update with new highs after initialization
+    if htf_high > post_crash_high
         post_crash_high := htf_high
         post_crash_high_bar := bar_index
 
@@ -280,10 +291,15 @@ var float reference_high = na
 var int reference_high_bar = 0
 
 if use_post_crash_mode
-    // Post-Crash Mode: use post-crash high if available, otherwise wait
+    // Post-Crash Mode: prefer post-crash high, but fallback to ATH if not available yet
+    // This prevents blocking all trades while waiting for crash detection + stabilization
     if not na(post_crash_high)
         reference_high := post_crash_high
         reference_high_bar := post_crash_high_bar
+    else
+        // Fallback to ATH while post-crash high not set (allows entries to happen)
+        reference_high := ath
+        reference_high_bar := last_ath_bar
 else
     // Normal ATH Mode: always use ATH
     reference_high := ath
@@ -388,8 +404,12 @@ can_short = trading_mode == "Short Only" or trading_mode == "Both"
 bars_since_ref_high = bar_index - reference_high_bar
 delay_met = bars_since_ref_high >= entry_delay
 
-// Check if we have a valid reference high to trade from
-has_reference = not na(reference_high)
+// In Post-Crash Mode: allow entries after min_bars_after_crash OR full stabilization
+// In Normal Mode: always allow (no crash gating)
+entry_allowed_after_crash = not use_post_crash_mode ? true : (stabilization_complete or (crash_detected and bars_since_crash_low >= min_bars_after_crash))
+
+// Check if we have a valid reference high to trade from AND crash conditions met
+has_reference = not na(reference_high) and entry_allowed_after_crash
 
 // Long Entry: Trigger on crossunder through ANY enabled entry level (retraced from reference high)
 // Only trigger if: has valid reference, level unused, delay met
