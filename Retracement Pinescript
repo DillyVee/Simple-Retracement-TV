@@ -133,8 +133,8 @@ use_post_crash_mode = input.bool(false, "Post-Crash Retracement Mode", group="Po
   tooltip="SWITCHES MODE: When ON, trade retracements from post-crash highs instead of ATHs. Detects crashes, waits for stabilization, then trades retracements from recovery highs. Levels reset on new crashes (not ATHs).")
 use_zscore = input.bool(true, "Use Z-Score Detection", group="Post-Crash Mode Settings",
   tooltip="Use statistical z-score instead of fixed % threshold. More adaptive to market volatility.")
-zscore_threshold = input.float(-2.5, "Z-Score Threshold", minval=-5.0, maxval=-1.0, step=0.1, group="Post-Crash Mode Settings",
-  tooltip="Z-score threshold for crash detection (e.g., -2.5 = return is 2.5 std devs below mean). More negative = more extreme crashes only.")
+zscore_threshold = input.float(2.5, "Z-Score Threshold", minval=1.0, maxval=5.0, step=0.1, group="Post-Crash Mode Settings",
+  tooltip="Z-score threshold for crash detection (e.g., 2.5 = drawdown is 2.5 std devs above mean). Higher = only detect more extreme crashes.")
 crash_drop_pct = input.float(30.0, "Fixed Drop Threshold (%)", minval=10, maxval=90, step=1, group="Post-Crash Mode Settings",
   tooltip="Fixed % drop threshold for crash detection (used when z-score disabled)")
 crash_lookback = input.int(100, "Lookback Period (bars)", minval=20, maxval=500, group="Post-Crash Mode Settings",
@@ -213,32 +213,44 @@ var float current_zscore = 0.0  // Current z-score of the drop
 var float post_crash_high = na  // Highest high since stabilization complete
 var int post_crash_high_bar = 0  // Bar when post-crash high was set
 
-// --------- ROBUST CRASH DETECTION WITH PROPER RETURNS-BASED Z-SCORE ------------
+// --------- ROBUST CRASH DETECTION WITH DRAWDOWN-BASED Z-SCORE ------------
+// FIXED: Now compares drawdowns to drawdowns (not returns to drawdowns)
 
-// Fetch HTF close for returns calculation
-htf_close = request.security(syminfo.tickerid, effective_htf, close, lookahead=barmerge.lookahead_off)
-
-// Calculate proper returns series (HTF bar-to-bar percent returns)
-ret = htf_close != 0 ? 100.0 * (htf_close - htf_close[1]) / htf_close[1] : 0.0
-mean_return = ta.sma(ret, crash_lookback)
-stdev_return = ta.stdev(ret, crash_lookback)
-
-// Calculate lookback high and current drop %
+// Calculate current drawdown from lookback high
 lookback_high := ta.highest(htf_high, crash_lookback)
 current_drop_pct = lookback_high > 0 ? 100.0 * (lookback_high - htf_low) / lookback_high : 0.0
 
-// For z-score: convert drop % to negative return (to align with returns sign convention)
-// A 30% drop becomes -30, comparable to negative returns in the 'ret' series
-current_return_for_z = -current_drop_pct
+// Z-Score calculation: compare current drawdown to historical drawdowns
+// On each bar, calculate: what was the max drawdown from a recent high?
+// This creates a consistent series of drawdown measurements to compare against
+var float mean_drawdown = 0.0
+var float stdev_drawdown = 0.0
 
-// Calculate z-score: how many standard deviations is current return from mean
-current_zscore := (stdev_return > 0) ? (current_return_for_z - mean_return) / stdev_return : 0.0
+if use_zscore
+    // For each bar, calculate drawdown from a rolling high
+    // Use a consistent window (20 bars) to measure "recent high to current low" drawdown
+    drawdown_window = 20
+
+    // Historical drawdown series: on each bar, % drop from rolling high
+    rolling_high = ta.highest(htf_high, drawdown_window)
+    historical_drawdown = rolling_high > 0 ? 100.0 * (rolling_high - htf_low) / rolling_high : 0.0
+
+    // Calculate statistics of historical drawdowns over crash_lookback period
+    mean_drawdown := ta.sma(historical_drawdown, crash_lookback)
+    stdev_drawdown := ta.stdev(historical_drawdown, crash_lookback)
+
+    // Z-score: how many std devs is current drawdown above the mean?
+    // Higher drawdown = higher z-score (positive value)
+    current_zscore := (stdev_drawdown > 0.1) ? (current_drop_pct - mean_drawdown) / stdev_drawdown : 0.0
+else
+    current_zscore := 0.0
 
 // Crash detection
 var bool is_crash = false
 if use_zscore
-    // Crash if z-score <= threshold (negative z-score = abnormally large drop)
-    is_crash := current_zscore <= zscore_threshold
+    // Crash if z-score >= threshold (large positive z-score = abnormally large drawdown)
+    // User sets threshold like 2.5 = "2.5 std devs above mean drawdown"
+    is_crash := current_zscore >= math.abs(zscore_threshold)
 else
     // Use fixed percentage threshold
     is_crash := current_drop_pct >= crash_drop_pct
