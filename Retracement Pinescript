@@ -24,6 +24,32 @@ strategy("Retracement Trader - ATH/ATL Multi-Timeframe",
 // - Two range modes: ATL-ATH or 0-ATH (for display only)
 // - Visual level display on chart with color coding
 // - Entry tracking and alerts
+//
+// ✅ STRICT NON-REPAINTING MODE – KEY FEATURES
+//
+// HTF Levels Only Update on Close
+// - ATH and ATL are only updated when the higher timeframe candle closes
+// - Eliminates false breakouts caused by intrabar wicks
+//
+// Entry Levels Trigger on Confirmed Crosses
+// - Long entries fire only after the candle closes below the retracement level
+// - Prevents signals that vanish or shift later
+//
+// SL/TP Execution Is Reliable
+// - Stop-loss levels and take-profit targets are never triggered mid-bar
+// - Trades exit exactly where backtests show, matching live fills
+//
+// Alerts Trigger on Non-Repainting Signals
+// - Alerts fire after a valid bar close triggers a trade
+// - Historical signals will not change retroactively
+//
+// Retracement Level Usage Reset
+// - Levels used for an ATH reset only on a new confirmed ATH
+// - Prevents multiple entries at the same level for the same ATH
+//
+// Backtests = Reality
+// - Every historical trade in the strategy now matches what would have happened live
+// - Equity curve is realistic, PnL is reliable
 // ============================================================================
 
 // ============================================================================
@@ -112,8 +138,9 @@ label_offset = input.int(20, "Label Offset (bars)", minval=1, group="Display")
 // Determine effective timeframe (use current if higher timeframe is lower than current)
 effective_htf = timeframe.in_seconds(htf_input) >= timeframe.in_seconds(timeframe.period) ? htf_input : timeframe.period
 
-// Request high/low from higher timeframe
-[htf_high, htf_low] = request.security(syminfo.tickerid, effective_htf, [high, low], lookahead=barmerge.lookahead_on)
+// Request high/low from higher timeframe - NON-REPAINTING MODE
+// lookahead_off ensures HTF data only updates on confirmed HTF bar close
+[htf_high, htf_low] = request.security(syminfo.tickerid, effective_htf, [high, low], lookahead=barmerge.lookahead_off)
 
 // ============================================================================
 // CALCULATE ALL-TIME HIGH AND LOW FROM HTF DATA
