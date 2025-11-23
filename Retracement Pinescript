@@ -219,7 +219,8 @@ current_drop_pct = lookback_high > 0 ? ((lookback_high - htf_low) / lookback_hig
 var bool is_abnormal_drop = false
 if use_zscore
     // Calculate returns from high to current price over lookback period
-    var array<float> returns = array.new_float(0)
+    // Don't use 'var' - recreate array fresh each bar to avoid exceeding size limit
+    array<float> returns = array.new_float(0)
 
     // Calculate percentage changes (returns) over lookback period
     for i = 1 to abnormal_lookback
