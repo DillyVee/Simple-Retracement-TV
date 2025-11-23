@@ -138,8 +138,9 @@ label_offset = input.int(20, "Label Offset (bars)", minval=1, group="Display")
 // Determine effective timeframe (use current if higher timeframe is lower than current)
 effective_htf = timeframe.in_seconds(htf_input) >= timeframe.in_seconds(timeframe.period) ? htf_input : timeframe.period
 
-// Request high/low from higher timeframe
-[htf_high, htf_low] = request.security(syminfo.tickerid, effective_htf, [high, low], lookahead=barmerge.lookahead_on)
+// Request high/low from higher timeframe - NON-REPAINTING MODE
+// lookahead_off ensures HTF data only updates on confirmed HTF bar close
+[htf_high, htf_low] = request.security(syminfo.tickerid, effective_htf, [high, low], lookahead=barmerge.lookahead_off)
 
 // ============================================================================
 // CALCULATE ALL-TIME HIGH AND LOW FROM HTF DATA
