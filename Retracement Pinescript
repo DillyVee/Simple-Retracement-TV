@@ -257,6 +257,11 @@ if use_post_crash_mode and is_crash and not crash_detected
     stabilization_complete := false
     post_crash_high := na  // Reset post-crash high
 
+    // Label the crash low with z-score
+    label.new(bar_index, htf_low,
+      "CRASH LOW\nz=" + str.tostring(current_zscore, "#.##"),
+      style=label.style_label_up, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+
 // Check if price makes a new low during stabilization period (resets timer)
 if crash_detected and not stabilization_complete
     if htf_low < crash_low
@@ -780,14 +785,6 @@ if long_exit_condition
 // ============================================================================
 
 if use_post_crash_mode
-    // Mark crash detection point (when crash is first detected)
-    var int last_crash_marked_bar = 0
-    if crash_detected and crash_low_bar != last_crash_marked_bar
-        label.new(crash_low_bar, htf_low,
-          "CRASH LOW\n" + str.tostring(htf_low, "#.####") + "\nz=" + str.tostring(current_zscore, "#.##"),
-          style=label.style_label_up, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
-        last_crash_marked_bar := crash_low_bar
-
     // Mark when stabilization completes
     var bool stabilization_marked = false
     if stabilization_complete and not stabilization_marked and barstate.islast
