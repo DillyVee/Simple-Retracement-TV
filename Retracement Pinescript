@@ -362,7 +362,7 @@ var bool used_entry_6 = false
 
 // Track previous reference values to detect resets
 var float prev_ath = na
-var bool prev_crash_detected = false
+var float prev_post_crash_high = na
 
 // Initialize tracking
 if na(prev_ath)
@@ -370,16 +370,21 @@ if na(prev_ath)
 
 // Reset logic depends on mode
 if use_post_crash_mode
-    // Post-Crash Mode: reset on NEW crash detection (transition from false to true)
-    if crash_detected and not prev_crash_detected
-        // New crash detected - reset all used flags
-        used_entry_1 := false
-        used_entry_2 := false
-        used_entry_3 := false
-        used_entry_4 := false
-        used_entry_5 := false
-        used_entry_6 := false
-    prev_crash_detected := crash_detected
+    // Post-Crash Mode: reset when post_crash_high INCREASES (new recovery high)
+    // This allows cycling through levels multiple times as price makes new highs after crash
+    if not na(post_crash_high)
+        if na(prev_post_crash_high)
+            prev_post_crash_high := post_crash_high
+
+        if post_crash_high > prev_post_crash_high
+            // New post-crash high reached - reset all used flags
+            used_entry_1 := false
+            used_entry_2 := false
+            used_entry_3 := false
+            used_entry_4 := false
+            used_entry_5 := false
+            used_entry_6 := false
+            prev_post_crash_high := post_crash_high
 else
     // Normal ATH Mode: reset on new ATH
     if ath > prev_ath
