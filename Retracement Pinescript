@@ -604,7 +604,7 @@ if show_info and barstate.islast
     used_count = entry_count - available_count
 
     // Adjust table size based on abnormal filter
-    table_rows = enable_abnormal_filter ? 18 : 16
+    table_rows = enable_abnormal_filter ? 19 : 16
     var table info = table.new(position.top_right, 2, table_rows, border_width=1)
 
     table.cell(info, 0, 0, "Retracement Trader MTF", bgcolor=color.new(color.blue, 70), text_color=color.white)
