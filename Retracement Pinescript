@@ -770,5 +770,39 @@ if long_exit_condition
     alert("Retracement: Long Exit at " + str.tostring(close, "#.####") + " | Triggered by " + exit_trigger, alert.freq_once_per_bar_close)
 
 // ============================================================================
+// VISUAL DEBUG MARKERS (Post-Crash Mode)
+// ============================================================================
+
+if use_post_crash_mode
+    // Mark crash detection point (when crash is first detected)
+    var int last_crash_marked_bar = 0
+    if crash_detected and crash_low_bar != last_crash_marked_bar
+        label.new(crash_low_bar, htf_low,
+          "CRASH LOW\n" + str.tostring(htf_low, "#.####") + "\nz=" + str.tostring(current_zscore, "#.##"),
+          style=label.style_label_up, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+        last_crash_marked_bar := crash_low_bar
+
+    // Mark when stabilization completes
+    var bool stabilization_marked = false
+    if stabilization_complete and not stabilization_marked and barstate.islast
+        label.new(bar_index, htf_low,
+          "Stabilization Complete",
+          style=label.style_label_up, color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny,
+          yloc=yloc.belowbar)
+        stabilization_marked := true
+
+    // Mark post-crash high when it's set
+    if not na(post_crash_high) and barstate.islast
+        line.new(bar_index - 50, post_crash_high, bar_index, post_crash_high,
+          color=color.new(color.orange, 50), width=2, style=line.style_dashed)
+        label.new(bar_index, post_crash_high,
+          "Post-Crash High: " + str.tostring(post_crash_high, "#.####"),
+          style=label.style_label_left, color=color.new(color.orange, 30), textcolor=color.white, size=size.small)
+
+// Plot z-score for debugging (when post-crash mode enabled)
+plot(use_post_crash_mode ? current_zscore : na, title="Z-Score", color=color.new(color.purple, 0), linewidth=2)
+hline(use_post_crash_mode ? zscore_threshold : na, title="Z-Score Threshold", color=color.new(color.red, 50), linestyle=hline.style_dashed)
+
+// ============================================================================
 // END - RETRACEMENT TRADER MTF
 // ============================================================================
