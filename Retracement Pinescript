@@ -214,30 +214,37 @@ var float post_crash_high = na  // Highest high since stabilization complete
 var int post_crash_high_bar = 0  // Bar when post-crash high was set
 
 // --------- ROBUST CRASH DETECTION WITH DRAWDOWN-BASED Z-SCORE ------------
-// FIXED: Now compares drawdowns to drawdowns (not returns to drawdowns)
+// FIXED: Now properly compares drawdowns using consistent measurement periods
 
 // Calculate current drawdown from lookback high
 lookback_high := ta.highest(htf_high, crash_lookback)
 current_drop_pct = lookback_high > 0 ? 100.0 * (lookback_high - htf_low) / lookback_high : 0.0
 
 // Z-Score calculation: compare current drawdown to historical drawdowns
-// On each bar, calculate: what was the max drawdown from a recent high?
-// This creates a consistent series of drawdown measurements to compare against
+// Strategy: Build a time series of max drawdowns, each measured over crash_lookback bars
+// Then calculate z-score of current drawdown vs historical distribution
 var float mean_drawdown = 0.0
 var float stdev_drawdown = 0.0
 
 if use_zscore
-    // For each bar, calculate drawdown from a rolling high
-    // Use a consistent window (20 bars) to measure "recent high to current low" drawdown
-    drawdown_window = 20
+    // On each bar, calculate the maximum drawdown over the crash_lookback period
+    // This creates a consistent series where every measurement uses the same method
+    // For each bar in history: what was the max % drop from high to low over last N bars?
+    float historical_drawdown = 0.0
+    for i = 0 to crash_lookback - 1
+        // For each point in the lookback window, find the highest high before it
+        // and calculate drawdown from that high to the low at that point
+        historical_high = ta.highest(htf_high[i], crash_lookback)
+        historical_low = htf_low[i]
+        drawdown_at_i = historical_high > 0 ? 100.0 * (historical_high - historical_low) / historical_high : 0.0
+        // Track the maximum drawdown seen in this window
+        if drawdown_at_i > historical_drawdown
+            historical_drawdown := drawdown_at_i
 
-    // Historical drawdown series: on each bar, % drop from rolling high
-    rolling_high = ta.highest(htf_high, drawdown_window)
-    historical_drawdown = rolling_high > 0 ? 100.0 * (rolling_high - htf_low) / rolling_high : 0.0
-
-    // Calculate statistics of historical drawdowns over crash_lookback period
-    mean_drawdown := ta.sma(historical_drawdown, crash_lookback)
-    stdev_drawdown := ta.stdev(historical_drawdown, crash_lookback)
+    // Calculate statistics of the drawdown series over crash_lookback period
+    // Use the same calculation on historical bars to build a distribution
+    mean_drawdown := ta.sma(current_drop_pct, crash_lookback)
+    stdev_drawdown := ta.stdev(current_drop_pct, crash_lookback)
 
     // Z-score: how many std devs is current drawdown above the mean?
     // Higher drawdown = higher z-score (positive value)
