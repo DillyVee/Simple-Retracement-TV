@@ -641,10 +641,11 @@ if show_info and barstate.islast
         table.merge_cells(info, 0, 5, 1, 5)
 
         table.cell(info, 0, 6, "Drop Detected", bgcolor=color.new(color.gray, 90))
+        drop_status = ""
         if use_zscore
-            drop_status = abnormal_condition_met ? "Yes (z=" + str.tostring(current_zscore, "#.##") + ")" : "No (z=" + str.tostring(current_zscore, "#.##") + ")"
+            drop_status := abnormal_condition_met ? "Yes (z=" + str.tostring(current_zscore, "#.##") + ")" : "No (z=" + str.tostring(current_zscore, "#.##") + ")"
         else
-            drop_status = abnormal_condition_met ? "Yes (" + str.tostring(current_drop_pct, "#.#") + "%)" : "No (" + str.tostring(current_drop_pct, "#.#") + "%)"
+            drop_status := abnormal_condition_met ? "Yes (" + str.tostring(current_drop_pct, "#.#") + "%)" : "No (" + str.tostring(current_drop_pct, "#.#") + "%)"
         drop_color = abnormal_condition_met ? color.orange : color.gray
         table.cell(info, 1, 6, drop_status, text_color=drop_color)
 
