@@ -19,6 +19,8 @@ strategy("Retracement Trader - ATH/ATL Multi-Timeframe",
 // - Multiple customizable exit levels (% below ATH) with individual toggles
 // - Entry when bar closes at/below retracement level (% down from ATH)
 // - Exit when price returns to stored ATH (TP) OR closes below exit level (SL)
+// - Each retracement level can only be used ONCE per new all-time high
+// - Level usage resets when a new ATH is reached
 // - Two range modes: ATL-ATH or 0-ATH (for display only)
 // - Visual level display on chart with color coding
 // - Entry tracking and alerts
@@ -188,6 +190,35 @@ level_78_6 = calc_retracement(78.6)
 var float entry_ath = na
 
 // ============================================================================
+// TRACK RETRACEMENT LEVEL USAGE PER ATH
+// ============================================================================
+
+// Track which levels have been used for the current ATH
+var bool used_entry_1 = false
+var bool used_entry_2 = false
+var bool used_entry_3 = false
+var bool used_entry_4 = false
+var bool used_entry_5 = false
+var bool used_entry_6 = false
+
+// Track previous ATH to detect when we hit a new all-time high
+var float prev_ath = na
+
+// Reset all used flags when we reach a new ATH
+if na(prev_ath)
+    prev_ath := ath
+
+if ath > prev_ath
+    // New ATH reached - reset all used flags
+    used_entry_1 := false
+    used_entry_2 := false
+    used_entry_3 := false
+    used_entry_4 := false
+    used_entry_5 := false
+    used_entry_6 := false
+    prev_ath := ath
+
+// ============================================================================
 // TRADING LOGIC
 // ============================================================================
 
@@ -196,18 +227,32 @@ can_long = trading_mode == "Long Only" or trading_mode == "Both"
 can_short = trading_mode == "Short Only" or trading_mode == "Both"
 
 // Long Entry: Trigger on crossunder through ANY enabled entry level (retraced from ATH)
-long_entry_1 = enable_long_entry_1 and ta.crossunder(close, long_entry_price_1)
-long_entry_2 = enable_long_entry_2 and ta.crossunder(close, long_entry_price_2)
-long_entry_3 = enable_long_entry_3 and ta.crossunder(close, long_entry_price_3)
-long_entry_4 = enable_long_entry_4 and ta.crossunder(close, long_entry_price_4)
-long_entry_5 = enable_long_entry_5 and ta.crossunder(close, long_entry_price_5)
-long_entry_6 = enable_long_entry_6 and ta.crossunder(close, long_entry_price_6)
+// Only trigger if the level hasn't been used yet for the current ATH
+long_entry_1 = enable_long_entry_1 and not used_entry_1 and ta.crossunder(close, long_entry_price_1)
+long_entry_2 = enable_long_entry_2 and not used_entry_2 and ta.crossunder(close, long_entry_price_2)
+long_entry_3 = enable_long_entry_3 and not used_entry_3 and ta.crossunder(close, long_entry_price_3)
+long_entry_4 = enable_long_entry_4 and not used_entry_4 and ta.crossunder(close, long_entry_price_4)
+long_entry_5 = enable_long_entry_5 and not used_entry_5 and ta.crossunder(close, long_entry_price_5)
+long_entry_6 = enable_long_entry_6 and not used_entry_6 and ta.crossunder(close, long_entry_price_6)
 
 long_entry_condition = (long_entry_1 or long_entry_2 or long_entry_3 or long_entry_4 or long_entry_5 or long_entry_6) and can_long
 
-// Store ATH when we enter the position
+// Store ATH when we enter the position and mark the level as used
 if long_entry_condition and strategy.position_size == 0
     entry_ath := ath
+    // Mark the triggered level as used
+    if long_entry_1
+        used_entry_1 := true
+    if long_entry_2
+        used_entry_2 := true
+    if long_entry_3
+        used_entry_3 := true
+    if long_entry_4
+        used_entry_4 := true
+    if long_entry_5
+        used_entry_5 := true
+    if long_entry_6
+        used_entry_6 := true
 
 // Long Exit: Crossover back to stored ATH (take profit) OR crossunder below exit level (stop-loss)
 long_exit_tp = strategy.position_size > 0 and ta.crossover(close, entry_ath)  // TP: Cross back above stored ATH
@@ -413,7 +458,11 @@ if show_info and barstate.islast
     entry_count = (enable_long_entry_1 ? 1 : 0) + (enable_long_entry_2 ? 1 : 0) + (enable_long_entry_3 ? 1 : 0) + (enable_long_entry_4 ? 1 : 0) + (enable_long_entry_5 ? 1 : 0) + (enable_long_entry_6 ? 1 : 0)
     exit_count = (enable_long_exit_1 ? 1 : 0) + (enable_long_exit_2 ? 1 : 0) + (enable_long_exit_3 ? 1 : 0) + (enable_long_exit_4 ? 1 : 0) + (enable_long_exit_5 ? 1 : 0) + (enable_long_exit_6 ? 1 : 0)
 
-    var table info = table.new(position.top_right, 2, 14, border_width=1)
+    // Count available (not used) entry levels
+    available_count = ((enable_long_entry_1 and not used_entry_1) ? 1 : 0) + ((enable_long_entry_2 and not used_entry_2) ? 1 : 0) + ((enable_long_entry_3 and not used_entry_3) ? 1 : 0) + ((enable_long_entry_4 and not used_entry_4) ? 1 : 0) + ((enable_long_entry_5 and not used_entry_5) ? 1 : 0) + ((enable_long_entry_6 and not used_entry_6) ? 1 : 0)
+    used_count = entry_count - available_count
+
+    var table info = table.new(position.top_right, 2, 15, border_width=1)
 
     table.cell(info, 0, 0, "Retracement Trader MTF", bgcolor=color.new(color.blue, 70), text_color=color.white)
     table.merge_cells(info, 0, 0, 1, 0)
@@ -446,19 +495,22 @@ if show_info and barstate.islast
     table.cell(info, 0, 9, "Entry Levels", bgcolor=color.new(color.gray, 90))
     table.cell(info, 1, 9, str.tostring(entry_count) + " active", text_color=color.blue)
 
-    table.cell(info, 0, 10, "Exit Levels", bgcolor=color.new(color.gray, 90))
-    table.cell(info, 1, 10, str.tostring(exit_count) + " active", text_color=color.lime)
+    table.cell(info, 0, 10, "Available/Used", bgcolor=color.new(color.gray, 90))
+    table.cell(info, 1, 10, str.tostring(available_count) + "/" + str.tostring(used_count), text_color=available_count > 0 ? color.green : color.orange)
 
-    table.cell(info, 0, 11, "Status", bgcolor=color.new(color.gray, 70), text_color=color.white)
-    table.merge_cells(info, 0, 11, 1, 11)
+    table.cell(info, 0, 11, "Exit Levels", bgcolor=color.new(color.gray, 90))
+    table.cell(info, 1, 11, str.tostring(exit_count) + " active", text_color=color.lime)
 
-    table.cell(info, 0, 12, "Current Price", bgcolor=color.new(color.gray, 90))
+    table.cell(info, 0, 12, "Status", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.merge_cells(info, 0, 12, 1, 12)
+
+    table.cell(info, 0, 13, "Current Price", bgcolor=color.new(color.gray, 90))
     price_pct = range_size > 0 ? (close - range_low) / range_size * 100 : 0
-    table.cell(info, 1, 12, str.tostring(close, "#.####") + " (" + str.tostring(price_pct, "#.#") + "%)", text_color=color.yellow)
+    table.cell(info, 1, 13, str.tostring(close, "#.####") + " (" + str.tostring(price_pct, "#.#") + "%)", text_color=color.yellow)
 
-    table.cell(info, 0, 13, "Net P&L", bgcolor=color.new(color.gray, 90))
+    table.cell(info, 0, 14, "Net P&L", bgcolor=color.new(color.gray, 90))
     pnl_color = strategy.netprofit > 0 ? color.green : color.red
-    table.cell(info, 1, 13, str.tostring(strategy.netprofit, "#,###"), text_color=pnl_color)
+    table.cell(info, 1, 14, str.tostring(strategy.netprofit, "#,###"), text_color=pnl_color)
 
 // ============================================================================
 // ALERTS
