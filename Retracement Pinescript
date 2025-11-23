@@ -131,10 +131,14 @@ ath_entry_delay = input.int(0, "Bars Delay After New ATH", minval=0, maxval=500,
 // Abnormal Downtrend Detection
 enable_abnormal_filter = input.bool(false, "Enable Abnormal Downtrend Filter", group="Abnormal Downtrend Settings",
   tooltip="Only trade after an abnormal downtrend has occurred and stabilized")
-abnormal_drop_pct = input.float(30.0, "Abnormal Drop Threshold (%)", minval=10, maxval=90, step=1, group="Abnormal Downtrend Settings",
-  tooltip="Minimum % drop from recent high to qualify as abnormal downtrend")
-abnormal_lookback = input.int(100, "Drop Lookback Period (bars)", minval=20, maxval=500, group="Abnormal Downtrend Settings",
-  tooltip="Period to look back for detecting the drop from high")
+use_zscore = input.bool(true, "Use Z-Score Detection", group="Abnormal Downtrend Settings",
+  tooltip="Use statistical z-score instead of fixed % threshold. More adaptive to market volatility.")
+zscore_threshold = input.float(-2.5, "Z-Score Threshold", minval=-5, maxval=-1, step=0.1, group="Abnormal Downtrend Settings",
+  tooltip="Negative z-score threshold for abnormal drop (e.g., -2.5 = 2.5 std devs below mean). More negative = more extreme.")
+abnormal_drop_pct = input.float(30.0, "Fixed Drop Threshold (%)", minval=10, maxval=90, step=1, group="Abnormal Downtrend Settings",
+  tooltip="Fixed % drop threshold (used when z-score disabled)")
+abnormal_lookback = input.int(100, "Lookback Period (bars)", minval=20, maxval=500, group="Abnormal Downtrend Settings",
+  tooltip="Period to calculate statistics and detect drops")
 stabilization_days = input.int(30, "Stabilization Days After Low", minval=0, maxval=365, group="Abnormal Downtrend Settings",
   tooltip="Wait this many days after abnormal low before allowing entries. Price must not make new lows during this period.")
 
@@ -203,13 +207,44 @@ var int abnormal_low_bar = 0  // Bar when abnormal low was detected
 var bool abnormal_condition_met = false  // Has abnormal downtrend occurred
 var bool stabilization_complete = false  // Has stabilization period passed
 var float lookback_high = na  // High from lookback period for drop calculation
+var float current_zscore = 0.0  // Current z-score of the drop
 
 // Calculate highest high in lookback period
 lookback_high := ta.highest(htf_high, abnormal_lookback)
 
-// Detect abnormal downtrend: current price dropped X% from lookback high
+// Calculate drop percentage
 current_drop_pct = lookback_high > 0 ? ((lookback_high - htf_low) / lookback_high) * 100 : 0
-is_abnormal_drop = current_drop_pct >= abnormal_drop_pct
+
+// Z-Score calculation for abnormal drop detection
+var bool is_abnormal_drop = false
+if use_zscore
+    // Calculate returns from high to current price over lookback period
+    var array<float> returns = array.new_float(0)
+
+    // Calculate percentage changes (returns) over lookback period
+    for i = 1 to abnormal_lookback
+        if bar_index >= i
+            prev_price = htf_high[i]
+            curr_price = htf_low[i-1]
+            if prev_price > 0
+                ret = ((curr_price - prev_price) / prev_price) * 100
+                array.push(returns, ret)
+
+    // Calculate mean and standard deviation of returns
+    mean_return = array.size(returns) > 0 ? array.avg(returns) : 0.0
+    stdev_return = array.size(returns) > 0 ? array.stdev(returns) : 0.0
+
+    // Calculate current return (drop from lookback high to current low)
+    current_return = lookback_high > 0 ? ((htf_low - lookback_high) / lookback_high) * 100 : 0
+
+    // Calculate z-score (how many standard deviations from mean)
+    current_zscore := stdev_return > 0 ? (current_return - mean_return) / stdev_return : 0
+
+    // Abnormal if z-score is below threshold (more negative = more extreme drop)
+    is_abnormal_drop := current_zscore <= zscore_threshold
+else
+    // Use fixed percentage threshold
+    is_abnormal_drop := current_drop_pct >= abnormal_drop_pct
 
 // Track when abnormal condition is first met
 if enable_abnormal_filter and is_abnormal_drop and not abnormal_condition_met
@@ -606,7 +641,10 @@ if show_info and barstate.islast
         table.merge_cells(info, 0, 5, 1, 5)
 
         table.cell(info, 0, 6, "Drop Detected", bgcolor=color.new(color.gray, 90))
-        drop_status = abnormal_condition_met ? "Yes (" + str.tostring(current_drop_pct, "#.#") + "%)" : "No (" + str.tostring(current_drop_pct, "#.#") + "%)"
+        if use_zscore
+            drop_status = abnormal_condition_met ? "Yes (z=" + str.tostring(current_zscore, "#.##") + ")" : "No (z=" + str.tostring(current_zscore, "#.##") + ")"
+        else
+            drop_status = abnormal_condition_met ? "Yes (" + str.tostring(current_drop_pct, "#.#") + "%)" : "No (" + str.tostring(current_drop_pct, "#.#") + "%)"
         drop_color = abnormal_condition_met ? color.orange : color.gray
         table.cell(info, 1, 6, drop_status, text_color=drop_color)
 
