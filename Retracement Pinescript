@@ -124,25 +124,9 @@ trading_mode = input.string("Both", "Trading Mode",
   group="Trading Settings")
 
 // Entry Delay
-entry_delay = input.int(0, "Bars Delay After Reference High", minval=0, maxval=500,
+entry_delay = input.int(0, "Bars Delay After Local Low", minval=0, maxval=500,
   group="Trading Settings",
-  tooltip="Wait this many bars after reference high is set before allowing entries. Prevents entering too early. 0 = no delay.")
-
-// Post-Crash Retracement Mode
-use_post_crash_mode = input.bool(false, "Post-Crash Retracement Mode", group="Post-Crash Mode Settings",
-  tooltip="SWITCHES MODE: When ON, trade retracements from post-crash highs instead of ATHs. Detects crashes, waits for stabilization, then trades retracements from recovery highs. Levels reset on new crashes (not ATHs).")
-use_zscore = input.bool(true, "Use Z-Score Detection", group="Post-Crash Mode Settings",
-  tooltip="Use statistical z-score instead of fixed % threshold. More adaptive to market volatility.")
-zscore_threshold = input.float(2.5, "Z-Score Threshold", minval=1.0, maxval=5.0, step=0.1, group="Post-Crash Mode Settings",
-  tooltip="Z-score threshold for crash detection (e.g., 2.5 = drawdown is 2.5 std devs above mean). Higher = only detect more extreme crashes.")
-crash_drop_pct = input.float(30.0, "Fixed Drop Threshold (%)", minval=10, maxval=90, step=1, group="Post-Crash Mode Settings",
-  tooltip="Fixed % drop threshold for crash detection (used when z-score disabled)")
-crash_lookback = input.int(100, "Lookback Period (bars)", minval=20, maxval=500, group="Post-Crash Mode Settings",
-  tooltip="Period to calculate statistics and detect crashes")
-stabilization_days = input.int(30, "Stabilization Days After Low", minval=0, maxval=365, group="Post-Crash Mode Settings",
-  tooltip="Wait this many days after crash low before tracking recovery high. Price must not make new lows during this period.")
-min_bars_after_crash = input.int(3, "Min Bars After Crash (Fast Entry)", minval=0, maxval=100, group="Post-Crash Mode Settings",
-  tooltip="Allow entries this many bars after crash detection, even if stabilization isn't complete. 0 = require full stabilization. Use for faster entries.")
+  tooltip="Wait this many bars after local low is detected before allowing entries. Prevents entering too early. 0 = no delay.")
 
 // Slope/Gradient Change Detection (Quant-Fund Methods)
 use_slope_detection = input.bool(true, "Enable Slope Change Detection", group="Slope Detection Settings",
@@ -340,149 +324,41 @@ if htf_low < atl
     atl := htf_low
     atl_bar := bar_index
 
-// Store the ATH for exits (this is our take profit target for longs)
-var float stored_ath_for_exit = na
-stored_ath_for_exit := ath  // Always track current ATH
-
-// Store the ATL for exits (this is our take profit target for shorts)
-var float stored_atl_for_exit = na
-stored_atl_for_exit := atl  // Always track current ATL
-
 // ============================================================================
-// POST-CRASH RETRACEMENT MODE
+// TRACK HIGH AFTER LOCAL LOW (FOR RETRACEMENT TRADING)
 // ============================================================================
 
-var float crash_low = na  // The low from the crash
-var int crash_low_bar = 0  // Bar when crash low was detected
-var bool crash_detected = false  // Has crash been detected
-var bool stabilization_complete = false  // Has stabilization period passed
-var float lookback_high = na  // High from lookback period for drop calculation
-var float current_zscore = 0.0  // Current z-score of the drop
-var float post_crash_high = na  // Highest high since stabilization complete
-var int post_crash_high_bar = 0  // Bar when post-crash high was set
+// Track the highest high that occurs AFTER each slope-detected low
+var float high_after_low = na
+var int high_after_low_bar = 0
+var float reference_low = na
+var int reference_low_bar = 0
+var string reference_source = "Waiting"  // Track what source is being used
 
-// --------- ROBUST CRASH DETECTION WITH DRAWDOWN-BASED Z-SCORE ------------
-// FIXED: Now properly compares drawdowns using consistent measurement periods
+// When a new local low is detected, reset the tracking
+if use_slope_detection and slope_change_to_positive
+    reference_low := slope_detected_low
+    reference_low_bar := slope_low_bar
+    high_after_low := htf_high  // Initialize with current high
+    high_after_low_bar := bar_index
+    reference_source := "Slope Low"
 
-// Calculate current drawdown from lookback high
-lookback_high := ta.highest(htf_high, crash_lookback)
-current_drop_pct = lookback_high > 0 ? 100.0 * (lookback_high - htf_low) / lookback_high : 0.0
+// After detecting a low, continuously update the highest high
+if use_slope_detection and not na(reference_low)
+    if htf_high > high_after_low
+        high_after_low := htf_high
+        high_after_low_bar := bar_index
 
-// Z-Score calculation: compare current drawdown to historical drawdowns
-// Strategy: Build a time series of max drawdowns, each measured over crash_lookback bars
-// Then calculate z-score of current drawdown vs historical distribution
-var float mean_drawdown = 0.0
-var float stdev_drawdown = 0.0
-
-if use_zscore
-    // Calculate statistics of the drawdown series over crash_lookback period
-    // current_drop_pct is calculated the same way on each bar, creating a time series
-    // of max drawdowns that we can use for statistical analysis
-    mean_drawdown := ta.sma(current_drop_pct, crash_lookback)
-    stdev_drawdown := ta.stdev(current_drop_pct, crash_lookback)
-
-    // Z-score: how many std devs is current drawdown above the mean?
-    // Higher drawdown = higher z-score (positive value)
-    current_zscore := (stdev_drawdown > 0.1) ? (current_drop_pct - mean_drawdown) / stdev_drawdown : 0.0
-else
-    current_zscore := 0.0
-
-// Crash detection
-var bool is_crash = false
-if use_zscore
-    // Crash if z-score >= threshold (large positive z-score = abnormally large drawdown)
-    // User sets threshold like 2.5 = "2.5 std devs above mean drawdown"
-    is_crash := current_zscore >= math.abs(zscore_threshold)
-else
-    // Use fixed percentage threshold
-    is_crash := current_drop_pct >= crash_drop_pct
-
-// Track when crash condition is first met
-if use_post_crash_mode and is_crash and not crash_detected
-    crash_detected := true
-    crash_low := htf_low
-    crash_low_bar := bar_index
-    stabilization_complete := false
-    post_crash_high := na  // Reset post-crash high
-
-    // Label the crash low with z-score
-    label.new(bar_index, htf_low,
-      "CRASH LOW\nz=" + str.tostring(current_zscore, "#.##"),
-      style=label.style_label_up, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
-
-// Check if price makes a new low during stabilization period (resets timer)
-if crash_detected and not stabilization_complete
-    if htf_low < crash_low
-        crash_low := htf_low
-        crash_low_bar := bar_index  // Reset the timer
-
-// Calculate bars since crash low
-bars_since_crash_low = crash_detected ? bar_index - crash_low_bar : 0
-
-// Convert stabilization days to bars based on timeframe (robust calculation)
-bars_per_day = timeframe.in_seconds("D") / timeframe.in_seconds(effective_htf)
-stabilization_bars = math.max(1, math.round(stabilization_days * bars_per_day))  // Ensure at least 1 bar
-
-// Check if stabilization period is complete
-if crash_detected and bars_since_crash_low >= stabilization_bars
-    stabilization_complete := true
-
-// Track highest high since stabilization complete (this becomes our reference high in post-crash mode)
-if use_post_crash_mode and stabilization_complete
-    // Initialize post_crash_high immediately when stabilization completes
-    // Use highest HTF high since crash low bar to give an immediate reference
-    if na(post_crash_high)
-        lookback_len = math.max(1, bar_index - crash_low_bar + 1)
-        post_crash_high := ta.highest(htf_high, lookback_len)
-        post_crash_high_bar := bar_index
-    // Update with new highs after initialization
-    if htf_high > post_crash_high
-        post_crash_high := htf_high
-        post_crash_high_bar := bar_index
+// Fallback to ATH/ATL if slope detection hasn't found a low yet
+if use_slope_detection and na(reference_low)
+    reference_low := atl
+    reference_low_bar := atl_bar
+    high_after_low := ath
+    high_after_low_bar := ath_bar
+    reference_source := "ATL/ATH (fallback)"
 
 // ============================================================================
-// DETERMINE REFERENCE HIGH (Slope-Detected, ATH, or Post-Crash High)
-// ============================================================================
-
-// Priority order:
-// 1. If Slope Detection enabled: use slope-detected high
-// 2. If Post-Crash Mode enabled: use post-crash high
-// 3. Otherwise: use ATH
-var float reference_high = na
-var int reference_high_bar = 0
-var string reference_source = "ATH"  // Track what source is being used
-
-if use_slope_detection
-    // Slope Detection Mode: use slope-detected high
-    if not na(slope_detected_high)
-        reference_high := slope_detected_high
-        reference_high_bar := slope_high_bar
-        reference_source := "Slope High"
-    else
-        // Fallback to ATH if no slope high detected yet
-        reference_high := ath
-        reference_high_bar := last_ath_bar
-        reference_source := "ATH (fallback)"
-else if use_post_crash_mode
-    // Post-Crash Mode: prefer post-crash high, but fallback to ATH if not available yet
-    // This prevents blocking all trades while waiting for crash detection + stabilization
-    if not na(post_crash_high)
-        reference_high := post_crash_high
-        reference_high_bar := post_crash_high_bar
-        reference_source := "Post-Crash High"
-    else
-        // Fallback to ATH while post-crash high not set (allows entries to happen)
-        reference_high := ath
-        reference_high_bar := last_ath_bar
-        reference_source := "ATH (fallback)"
-else
-    // Normal ATH Mode: always use ATH
-    reference_high := ath
-    reference_high_bar := last_ath_bar
-    reference_source := "ATH"
-
-// ============================================================================
-// CALCULATE RETRACEMENT LEVELS (% down from Reference High)
+// CALCULATE RETRACEMENT LEVELS (Fibonacci retracements from low to high)
 // ============================================================================
 
 // Determine range based on mode (for display only)
@@ -490,36 +366,43 @@ range_low = range_mode == "ATL to ATH" ? atl : 0.0
 range_high = ath
 range_size = range_high - range_low
 
-// Calculate retracement level prices as % down from reference high
-// Entry at 12.5% means price is 12.5% below reference high (ref_high * 0.875)
-calc_retracement(percentage) =>
-    reference_high * (1 - percentage / 100.0)
+// Calculate the range between the reference low and the high after that low
+low_to_high_range = not na(high_after_low) and not na(reference_low) ? (high_after_low - reference_low) : 0.0
 
-// Long Entry Levels - Calculate as % down from current ATH
-long_entry_price_1 = enable_long_entry_1 ? calc_retracement(long_entry_pct_1) : na
-long_entry_price_2 = enable_long_entry_2 ? calc_retracement(long_entry_pct_2) : na
-long_entry_price_3 = enable_long_entry_3 ? calc_retracement(long_entry_pct_3) : na
-long_entry_price_4 = enable_long_entry_4 ? calc_retracement(long_entry_pct_4) : na
-long_entry_price_5 = enable_long_entry_5 ? calc_retracement(long_entry_pct_5) : na
-long_entry_price_6 = enable_long_entry_6 ? calc_retracement(long_entry_pct_6) : na
+// Calculate Fibonacci retracement levels
+// Retracements are measured DOWN from the high toward the low
+// Example: 23.6% retracement = high - (range * 0.236)
+calc_fib_retracement(percentage) =>
+    if not na(high_after_low) and not na(reference_low)
+        high_after_low - (low_to_high_range * (percentage / 100.0))
+    else
+        na
 
-// Long Exit Levels - Calculate as % down from current ATH
-long_exit_price_1 = enable_long_exit_1 ? calc_retracement(long_exit_pct_1) : na
-long_exit_price_2 = enable_long_exit_2 ? calc_retracement(long_exit_pct_2) : na
-long_exit_price_3 = enable_long_exit_3 ? calc_retracement(long_exit_pct_3) : na
-long_exit_price_4 = enable_long_exit_4 ? calc_retracement(long_exit_pct_4) : na
-long_exit_price_5 = enable_long_exit_5 ? calc_retracement(long_exit_pct_5) : na
-long_exit_price_6 = enable_long_exit_6 ? calc_retracement(long_exit_pct_6) : na
+// Long Entry Levels - Fibonacci retracements from high back toward low
+long_entry_price_1 = enable_long_entry_1 ? calc_fib_retracement(long_entry_pct_1) : na
+long_entry_price_2 = enable_long_entry_2 ? calc_fib_retracement(long_entry_pct_2) : na
+long_entry_price_3 = enable_long_entry_3 ? calc_fib_retracement(long_entry_pct_3) : na
+long_entry_price_4 = enable_long_entry_4 ? calc_fib_retracement(long_entry_pct_4) : na
+long_entry_price_5 = enable_long_entry_5 ? calc_fib_retracement(long_entry_pct_5) : na
+long_entry_price_6 = enable_long_entry_6 ? calc_fib_retracement(long_entry_pct_6) : na
 
-// Common Fibonacci levels (for reference display only) - as % down from ATH
-level_23_6 = calc_retracement(23.6)
-level_38_2 = calc_retracement(38.2)
-level_50_0 = calc_retracement(50.0)
-level_61_8 = calc_retracement(61.8)
-level_78_6 = calc_retracement(78.6)
+// Long Exit Levels - Fibonacci retracements from high back toward low (stop losses)
+long_exit_price_1 = enable_long_exit_1 ? calc_fib_retracement(long_exit_pct_1) : na
+long_exit_price_2 = enable_long_exit_2 ? calc_fib_retracement(long_exit_pct_2) : na
+long_exit_price_3 = enable_long_exit_3 ? calc_fib_retracement(long_exit_pct_3) : na
+long_exit_price_4 = enable_long_exit_4 ? calc_fib_retracement(long_exit_pct_4) : na
+long_exit_price_5 = enable_long_exit_5 ? calc_fib_retracement(long_exit_pct_5) : na
+long_exit_price_6 = enable_long_exit_6 ? calc_fib_retracement(long_exit_pct_6) : na
 
-// Store the ATH at entry for take profit target
-var float entry_ath = na
+// Common Fibonacci levels (for reference display only)
+level_23_6 = calc_fib_retracement(23.6)
+level_38_2 = calc_fib_retracement(38.2)
+level_50_0 = calc_fib_retracement(50.0)
+level_61_8 = calc_fib_retracement(61.8)
+level_78_6 = calc_fib_retracement(78.6)
+
+// Store the high at entry for take profit target
+var float entry_high = na
 
 // Track which entry level was used (for tied exit levels)
 var int entry_level_used = 0  // 0 = no position, 1-6 = entry level number
@@ -528,7 +411,7 @@ var int entry_level_used = 0  // 0 = no position, 1-6 = entry level number
 // TRACK RETRACEMENT LEVEL USAGE
 // ============================================================================
 
-// Track which levels have been used for the current reference high
+// Track which levels have been used for the current reference low
 var bool used_entry_1 = false
 var bool used_entry_2 = false
 var bool used_entry_3 = false
@@ -536,59 +419,23 @@ var bool used_entry_4 = false
 var bool used_entry_5 = false
 var bool used_entry_6 = false
 
-// Track previous reference values to detect resets
-var float prev_ath = na
-var float prev_post_crash_high = na
-var float prev_slope_high = na
+// Track previous reference low to detect resets
+var float prev_slope_low = na
 
 // Initialize tracking
-if na(prev_ath)
-    prev_ath := ath
+if na(prev_slope_low) and not na(slope_detected_low)
+    prev_slope_low := slope_detected_low
 
-// Reset logic depends on mode
-if use_slope_detection
-    // Slope Detection Mode: reset when a new slope high is detected
-    if not na(slope_detected_high)
-        if na(prev_slope_high)
-            prev_slope_high := slope_detected_high
-
-        // Reset when we detect a new slope high (slope change to negative)
-        if slope_change_to_negative
-            // New slope high detected - reset all used flags
-            used_entry_1 := false
-            used_entry_2 := false
-            used_entry_3 := false
-            used_entry_4 := false
-            used_entry_5 := false
-            used_entry_6 := false
-            prev_slope_high := slope_detected_high
-else if use_post_crash_mode
-    // Post-Crash Mode: reset when post_crash_high INCREASES (new recovery high)
-    // This allows cycling through levels multiple times as price makes new highs after crash
-    if not na(post_crash_high)
-        if na(prev_post_crash_high)
-            prev_post_crash_high := post_crash_high
-
-        if post_crash_high > prev_post_crash_high
-            // New post-crash high reached - reset all used flags
-            used_entry_1 := false
-            used_entry_2 := false
-            used_entry_3 := false
-            used_entry_4 := false
-            used_entry_5 := false
-            used_entry_6 := false
-            prev_post_crash_high := post_crash_high
-else
-    // Normal ATH Mode: reset on new ATH
-    if ath > prev_ath
-        // New ATH reached - reset all used flags
-        used_entry_1 := false
-        used_entry_2 := false
-        used_entry_3 := false
-        used_entry_4 := false
-        used_entry_5 := false
-        used_entry_6 := false
-    prev_ath := ath
+// Reset logic: reset when a new slope low is detected (slope change to positive)
+if use_slope_detection and slope_change_to_positive
+    // New local low detected - reset all used flags
+    used_entry_1 := false
+    used_entry_2 := false
+    used_entry_3 := false
+    used_entry_4 := false
+    used_entry_5 := false
+    used_entry_6 := false
+    prev_slope_low := slope_detected_low
 
 // ============================================================================
 // TRADING LOGIC
@@ -598,18 +445,14 @@ else
 can_long = trading_mode == "Long Only" or trading_mode == "Both"
 can_short = trading_mode == "Short Only" or trading_mode == "Both"
 
-// Check if enough bars have passed since reference high was set for entry delay
-bars_since_ref_high = bar_index - reference_high_bar
-delay_met = bars_since_ref_high >= entry_delay
+// Check if enough bars have passed since reference low was set for entry delay
+bars_since_ref_low = bar_index - reference_low_bar
+delay_met = bars_since_ref_low >= entry_delay
 
-// In Post-Crash Mode: allow entries after min_bars_after_crash OR full stabilization
-// In Normal Mode: always allow (no crash gating)
-entry_allowed_after_crash = not use_post_crash_mode ? true : (stabilization_complete or (crash_detected and bars_since_crash_low >= min_bars_after_crash))
+// Check if we have a valid reference low and high to trade from
+has_reference = not na(reference_low) and not na(high_after_low) and low_to_high_range > 0
 
-// Check if we have a valid reference high to trade from AND crash conditions met
-has_reference = not na(reference_high) and entry_allowed_after_crash
-
-// Long Entry: Trigger on crossunder through ANY enabled entry level (retraced from reference high)
+// Long Entry: Trigger on crossunder through ANY enabled entry level (retracement from high toward low)
 // Only trigger if: has valid reference, level unused, delay met
 long_entry_1 = has_reference and enable_long_entry_1 and not used_entry_1 and delay_met and ta.crossunder(close, long_entry_price_1)
 long_entry_2 = has_reference and enable_long_entry_2 and not used_entry_2 and delay_met and ta.crossunder(close, long_entry_price_2)
@@ -620,9 +463,9 @@ long_entry_6 = has_reference and enable_long_entry_6 and not used_entry_6 and de
 
 long_entry_condition = (long_entry_1 or long_entry_2 or long_entry_3 or long_entry_4 or long_entry_5 or long_entry_6) and can_long
 
-// Store reference high when we enter the position and mark the level as used
+// Store high and low when we enter the position and mark the level as used
 if long_entry_condition and strategy.position_size == 0
-    entry_ath := reference_high  // Store reference high (ATH in normal mode, post-crash high in post-crash mode)
+    entry_high := high_after_low  // Store the high for take profit target
     // Mark the triggered level as used and track which level for tied exits
     if long_entry_1
         used_entry_1 := true
@@ -643,9 +486,9 @@ if long_entry_condition and strategy.position_size == 0
         used_entry_6 := true
         entry_level_used := 6
 
-// Long Exit: TP at stored reference high OR SL at tied exit level
-// Exit triggers if: close is below exit level OR open is below exit level (ensures reliable execution)
-long_exit_tp = strategy.position_size > 0 and ta.crossover(close, entry_ath)  // TP: Cross back above stored reference high
+// Long Exit: TP at stored high OR SL at tied exit level or below reference low
+// TP: Cross back up to the high we stored at entry
+long_exit_tp = strategy.position_size > 0 and ta.crossover(close, entry_high)
 
 // Tied stop-loss: Only use the exit level corresponding to the entry level
 // Exit if close OR open is below the exit level (not just crossunder)
@@ -684,7 +527,7 @@ else if long_entry_6
     entry_trigger := "Entry 6 (" + str.tostring(long_entry_pct_6, "#.#") + "%)"
 
 if long_exit_tp
-    exit_trigger := "Take Profit at ATH: " + str.tostring(entry_ath, "#.####")
+    exit_trigger := "Take Profit at High: " + str.tostring(entry_high, "#.####")
 else if long_exit_sl
     // Identify which tied exit level triggered
     if entry_level_used == 1
@@ -713,26 +556,21 @@ if long_exit_condition and strategy.position_size > 0
 // ============================================================================
 
 if show_levels and barstate.islast
-    // ATH line (reference)
-    line.new(bar_index - 200, ath, bar_index + label_offset, ath,
-      color=color.new(color.green, 0), width=2, style=line.style_solid)
-    label.new(bar_index + label_offset, ath,
-      "ATH: " + str.tostring(ath, "#.####"),
-      style=label.style_label_left, color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+    // Reference Low line (the slope-detected low)
+    if not na(reference_low)
+        line.new(bar_index - 200, reference_low, bar_index + label_offset, reference_low,
+          color=color.new(color.blue, 0), width=3, style=line.style_solid)
+        label.new(bar_index + label_offset, reference_low,
+          "Reference Low: " + str.tostring(reference_low, "#.####"),
+          style=label.style_label_left, color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
 
-    // ATL or Zero line (reference)
-    if range_mode == "ATL to ATH"
-        line.new(bar_index - 200, atl, bar_index + label_offset, atl,
-          color=color.new(color.red, 0), width=2, style=line.style_solid)
-        label.new(bar_index + label_offset, atl,
-          "ATL: " + str.tostring(atl, "#.####"),
-          style=label.style_label_left, color=color.new(color.red, 10), textcolor=color.white, size=size.small)
-    else
-        line.new(bar_index - 200, 0, bar_index + label_offset, 0,
-          color=color.new(color.red, 0), width=2, style=line.style_solid)
-        label.new(bar_index + label_offset, 0,
-          "Zero: 0.00",
-          style=label.style_label_left, color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+    // High After Low line (the high that occurred after the low)
+    if not na(high_after_low)
+        line.new(bar_index - 200, high_after_low, bar_index + label_offset, high_after_low,
+          color=color.new(color.green, 0), width=3, style=line.style_solid)
+        label.new(bar_index + label_offset, high_after_low,
+          "High After Low: " + str.tostring(high_after_low, "#.####"),
+          style=label.style_label_left, color=color.new(color.green, 10), textcolor=color.white, size=size.small)
 
     // Long Entry Levels (BLUE - Dashed)
     if enable_long_entry_1
@@ -864,91 +702,60 @@ if show_info and barstate.islast
     available_count = ((enable_long_entry_1 and not used_entry_1) ? 1 : 0) + ((enable_long_entry_2 and not used_entry_2) ? 1 : 0) + ((enable_long_entry_3 and not used_entry_3) ? 1 : 0) + ((enable_long_entry_4 and not used_entry_4) ? 1 : 0) + ((enable_long_entry_5 and not used_entry_5) ? 1 : 0) + ((enable_long_entry_6 and not used_entry_6) ? 1 : 0)
     used_count = entry_count - available_count
 
-    // Adjust table size based on mode (Slope detection and Post-Crash mode need more rows)
-    table_rows = use_slope_detection ? 23 : (use_post_crash_mode ? 21 : 17)
+    // Adjust table size based on slope detection
+    table_rows = use_slope_detection ? 20 : 15
     var table info = table.new(position.top_right, 2, table_rows, border_width=1)
 
-    table.cell(info, 0, 0, "Retracement Trader MTF", bgcolor=color.new(color.blue, 70), text_color=color.white)
+    table.cell(info, 0, 0, "Retracement Trader - Low to High", bgcolor=color.new(color.blue, 70), text_color=color.white)
     table.merge_cells(info, 0, 0, 1, 0)
 
     table.cell(info, 0, 1, "HTF Source", bgcolor=color.new(color.gray, 90))
     table.cell(info, 1, 1, effective_htf, text_color=color.yellow)
 
-    table.cell(info, 0, 2, "Range Mode", bgcolor=color.new(color.gray, 90))
-    table.cell(info, 1, 2, range_mode, text_color=color.white)
-
-    table.cell(info, 0, 3, "Trading Mode", bgcolor=color.new(color.gray, 90))
+    table.cell(info, 0, 2, "Trading Mode", bgcolor=color.new(color.gray, 90))
     mode_color = trading_mode == "Long Only" ? color.green : trading_mode == "Short Only" ? color.red : color.blue
-    table.cell(info, 1, 3, trading_mode, text_color=mode_color)
+    table.cell(info, 1, 2, trading_mode, text_color=mode_color)
 
-    table.cell(info, 0, 4, "Mode", bgcolor=color.new(color.gray, 90))
-    ref_mode = use_post_crash_mode ? "Post-Crash" : "ATH"
-    table.cell(info, 1, 4, ref_mode, text_color=use_post_crash_mode ? color.orange : color.green)
-
-    table.cell(info, 0, 5, "Entry Delay", bgcolor=color.new(color.gray, 90))
-    delay_status = entry_delay == 0 ? "Disabled" : (delay_met ? str.tostring(bars_since_ref_high) + "/" + str.tostring(entry_delay) + " ✓" : str.tostring(bars_since_ref_high) + "/" + str.tostring(entry_delay))
+    table.cell(info, 0, 3, "Entry Delay", bgcolor=color.new(color.gray, 90))
+    delay_status = entry_delay == 0 ? "Disabled" : (delay_met ? str.tostring(bars_since_ref_low) + "/" + str.tostring(entry_delay) + " ✓" : str.tostring(bars_since_ref_low) + "/" + str.tostring(entry_delay))
     delay_color = entry_delay == 0 ? color.gray : (delay_met ? color.green : color.orange)
-    table.cell(info, 1, 5, delay_status, text_color=delay_color)
+    table.cell(info, 1, 3, delay_status, text_color=delay_color)
 
     // Slope Detection status (if enabled)
-    current_row = 6
+    current_row = 4
     if use_slope_detection
-        table.cell(info, 0, 6, "Slope Detection", bgcolor=color.new(color.gray, 70), text_color=color.white)
-        table.merge_cells(info, 0, 6, 1, 6)
+        table.cell(info, 0, 4, "Slope Detection", bgcolor=color.new(color.gray, 70), text_color=color.white)
+        table.merge_cells(info, 0, 4, 1, 4)
 
-        table.cell(info, 0, 7, "Method", bgcolor=color.new(color.gray, 90))
-        table.cell(info, 1, 7, slope_method, text_color=color.purple)
+        table.cell(info, 0, 5, "Method", bgcolor=color.new(color.gray, 90))
+        table.cell(info, 1, 5, slope_method, text_color=color.purple)
 
-        table.cell(info, 0, 8, "Period", bgcolor=color.new(color.gray, 90))
-        table.cell(info, 1, 8, str.tostring(slope_period), text_color=color.white)
+        table.cell(info, 0, 6, "Period", bgcolor=color.new(color.gray, 90))
+        table.cell(info, 1, 6, str.tostring(slope_period), text_color=color.white)
 
-        table.cell(info, 0, 9, "Current Slope", bgcolor=color.new(color.gray, 90))
+        table.cell(info, 0, 7, "Current Slope", bgcolor=color.new(color.gray, 90))
         slope_direction = slope_sign == 1 ? "↑ Up" : (slope_sign == -1 ? "↓ Down" : "→ Flat")
         slope_color = slope_sign == 1 ? color.green : (slope_sign == -1 ? color.red : color.gray)
-        table.cell(info, 1, 9, slope_direction, text_color=slope_color)
+        table.cell(info, 1, 7, slope_direction, text_color=slope_color)
 
-        table.cell(info, 0, 10, "Ref Source", bgcolor=color.new(color.gray, 90))
-        table.cell(info, 1, 10, reference_source, text_color=color.yellow)
+        table.cell(info, 0, 8, "Ref Source", bgcolor=color.new(color.gray, 90))
+        table.cell(info, 1, 8, reference_source, text_color=color.yellow)
 
-        current_row := 11
+        current_row := 9
 
-    // Post-Crash Mode status (if enabled)
-    drop_status = ""
-    drop_color = color.gray
-    if use_post_crash_mode
-        table.cell(info, 0, current_row, "Post-Crash Status", bgcolor=color.new(color.gray, 70), text_color=color.white)
-        table.merge_cells(info, 0, current_row, 1, current_row)
-
-        table.cell(info, 0, current_row + 1, "Crash Detected", bgcolor=color.new(color.gray, 90))
-        if use_zscore
-            drop_status := crash_detected ? "Yes (z=" + str.tostring(current_zscore, "#.##") + ")" : "No (z=" + str.tostring(current_zscore, "#.##") + ")"
-        else
-            drop_status := crash_detected ? "Yes (" + str.tostring(current_drop_pct, "#.#") + "%)" : "No (" + str.tostring(current_drop_pct, "#.#") + "%)"
-        drop_color := crash_detected ? color.orange : color.gray
-        table.cell(info, 1, current_row + 1, drop_status, text_color=drop_color)
-
-        table.cell(info, 0, current_row + 2, "Stabilization", bgcolor=color.new(color.gray, 90))
-        stab_status = not crash_detected ? "Waiting for crash" : (stabilization_complete ? str.tostring(bars_since_crash_low) + "/" + str.tostring(stabilization_bars) + " ✓" : str.tostring(bars_since_crash_low) + "/" + str.tostring(stabilization_bars))
-        stab_color = stabilization_complete ? color.green : color.orange
-        table.cell(info, 1, current_row + 2, stab_status, text_color=stab_color)
-
-        table.cell(info, 0, current_row + 3, "Ref High", bgcolor=color.new(color.gray, 90))
-        ref_high_display = na(post_crash_high) ? "Waiting..." : str.tostring(post_crash_high, "#.####")
-        table.cell(info, 1, current_row + 3, ref_high_display, text_color=na(post_crash_high) ? color.gray : color.yellow)
-
-        current_row := current_row + 4
-
-    table.cell(info, 0, current_row, "Range", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(info, 0, current_row, "Retracement Range", bgcolor=color.new(color.gray, 70), text_color=color.white)
     table.merge_cells(info, 0, current_row, 1, current_row)
 
-    table.cell(info, 0, current_row + 1, "ATH", bgcolor=color.new(color.gray, 90))
-    table.cell(info, 1, current_row + 1, str.tostring(ath, "#.####"), text_color=color.green)
+    table.cell(info, 0, current_row + 1, "Reference Low", bgcolor=color.new(color.gray, 90))
+    ref_low_display = na(reference_low) ? "Waiting..." : str.tostring(reference_low, "#.####")
+    table.cell(info, 1, current_row + 1, ref_low_display, text_color=na(reference_low) ? color.gray : color.blue)
 
-    table.cell(info, 0, current_row + 2, "ATL/Zero", bgcolor=color.new(color.gray, 90))
-    table.cell(info, 1, current_row + 2, str.tostring(range_low, "#.####"), text_color=color.red)
+    table.cell(info, 0, current_row + 2, "High After Low", bgcolor=color.new(color.gray, 90))
+    high_display = na(high_after_low) ? "Waiting..." : str.tostring(high_after_low, "#.####")
+    table.cell(info, 1, current_row + 2, high_display, text_color=na(high_after_low) ? color.gray : color.green)
 
     table.cell(info, 0, current_row + 3, "Range Size", bgcolor=color.new(color.gray, 90))
-    table.cell(info, 1, current_row + 3, str.tostring(range_size, "#.####"), text_color=color.white)
+    table.cell(info, 1, current_row + 3, str.tostring(low_to_high_range, "#.####"), text_color=color.white)
 
     table.cell(info, 0, current_row + 4, "Active Levels", bgcolor=color.new(color.gray, 70), text_color=color.white)
     table.merge_cells(info, 0, current_row + 4, 1, current_row + 4)
@@ -966,7 +773,8 @@ if show_info and barstate.islast
     table.merge_cells(info, 0, current_row + 8, 1, current_row + 8)
 
     table.cell(info, 0, current_row + 9, "Current Price", bgcolor=color.new(color.gray, 90))
-    price_pct = range_size > 0 ? (close - range_low) / range_size * 100 : 0
+    // Calculate price position relative to low-to-high range (0% = at ref low, 100% = at high after low)
+    price_pct = low_to_high_range > 0 and not na(reference_low) ? (close - reference_low) / low_to_high_range * 100 : 0
     table.cell(info, 1, current_row + 9, str.tostring(close, "#.####") + " (" + str.tostring(price_pct, "#.#") + "%)", text_color=color.yellow)
 
     table.cell(info, 0, current_row + 10, "Net P&L", bgcolor=color.new(color.gray, 90))
@@ -998,45 +806,11 @@ if use_slope_detection
     if slope_change_to_positive
         label.new(bar_index, low,
           "LOCAL LOW\n" + slope_method + "\n" + str.tostring(slope_detected_low, "#.####"),
-          style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
-
-    // Show slope-detected high line on the chart
-    if not na(slope_detected_high) and barstate.islast
-        line.new(bar_index - 50, slope_detected_high, bar_index + label_offset, slope_detected_high,
-          color=color.new(color.purple, 30), width=3, style=line.style_solid)
-        label.new(bar_index + label_offset, slope_detected_high,
-          "Slope High: " + str.tostring(slope_detected_high, "#.####"),
-          style=label.style_label_left, color=color.new(color.purple, 20), textcolor=color.white, size=size.normal)
+          style=label.style_label_up, color=color.new(color.blue, 20), textcolor=color.white, size=size.small)
 
 // Plot slope for debugging (when slope detection enabled)
-plot(use_slope_detection ? normalized_slope * 10000 : na, title="Normalized Slope (x10000)", color=color.new(color.blue, 0), linewidth=1)
+plot(use_slope_detection ? normalized_slope * 10000 : na, title="Normalized Slope (x10000)", color=color.new(color.purple, 0), linewidth=1)
 hline(0, title="Zero Slope", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
-
-// ============================================================================
-// VISUAL DEBUG MARKERS (Post-Crash Mode)
-// ============================================================================
-
-if use_post_crash_mode
-    // Mark when stabilization completes
-    var bool stabilization_marked = false
-    if stabilization_complete and not stabilization_marked and barstate.islast
-        label.new(bar_index, htf_low,
-          "Stabilization Complete",
-          style=label.style_label_up, color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny,
-          yloc=yloc.belowbar)
-        stabilization_marked := true
-
-    // Mark post-crash high when it's set
-    if not na(post_crash_high) and barstate.islast
-        line.new(bar_index - 50, post_crash_high, bar_index, post_crash_high,
-          color=color.new(color.orange, 50), width=2, style=line.style_dashed)
-        label.new(bar_index, post_crash_high,
-          "Post-Crash High: " + str.tostring(post_crash_high, "#.####"),
-          style=label.style_label_left, color=color.new(color.orange, 30), textcolor=color.white, size=size.small)
-
-// Plot z-score for debugging (when post-crash mode enabled)
-plot(use_post_crash_mode ? current_zscore : na, title="Z-Score", color=color.new(color.purple, 0), linewidth=2)
-hline(use_post_crash_mode ? zscore_threshold : na, title="Z-Score Threshold", color=color.new(color.red, 50), linestyle=hline.style_dashed)
 
 // ============================================================================
 // END - RETRACEMENT TRADER MTF
